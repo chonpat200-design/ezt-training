@@ -1416,7 +1416,7 @@ async function callClaudeAPI(apiKey, model, systemPrompt, userPrompt, maxTokens 
 }
 async function generateQuizQuestions({ apiKey, model, topic, phase, department, count = 4, focusSkills = [] }) {
   if (!apiKey) return getFallbackQuestions(topic, phase, count, department);
-  const sys = "คุณเป็นผู้ออกข้อสอบสำหรับพนักงานใหม่ของ EZT ตอบกลับเป็น JSON array เท่านั้น ห้ามมีคำอธิบาย ห้ามมี markdown fence ใดๆ ทั้งสิ้น";
+  const sys = "คุณเป็นผู้ออกข้อสอบสำหรับพนักงานใหม่ของ EZT ตอบกลับตามรูปแบบข้อความที่ผู้ใช้กำหนดเท่านั้น ห้ามมีคำอธิบายเพิ่ม ห้ามใช้ markdown";
   const ctx = getDeptContext(department);
   const deptContext = department ? ` ของแผนก ${department} (ผู้ที่เกี่ยวข้องในสถานการณ์มักเป็น${ctx.people}, สิ่งที่มีความเสี่ยงคือ${ctx.stake}, เครื่องมือ/เอกสารที่ใช้บ่อยคือ${ctx.tool})` : "";
   const preInstruction = `ก่อนเรียน (Pre-test) เน้นวัดความรู้พื้นฐานของหัวข้อ ก่อนที่พนักงานจะได้ดูเนื้อหา ระดับความยากปานกลางถึงยาก ไม่ใช่ข้อที่ตอบได้ด้วยสามัญสำนึก
@@ -1442,18 +1442,39 @@ ${topic.knowledge}
 - แต่ละข้อมี 4 ตัวเลือก (choices) และระบุ index คำตอบที่ถูกที่สุด (answer) เป็นเลข 0-3
 - แต่ละข้อต้องมีฟิลด์ "skill" เป็นชื่อประเด็นย่อยที่ข้อนั้นวัด สั้นๆ 2-5 คำ (เช่น "การจัดลำดับความสำคัญ", "การขอความช่วยเหลือเมื่อไม่แน่ใจ") ให้แต่ละข้อวัดคนละประเด็นย่อยกัน ไม่ซ้ำกัน เพื่อใช้วิเคราะห์จุดอ่อนของพนักงานเป็นรายประเด็น
 - แต่ละข้อต้องมีฟิลด์ "explain" เป็นคำอธิบายสั้นๆ 1-2 ประโยคว่าทำไมตัวเลือกที่ถูกจึงถูก โดยอ้างอิงจากเนื้อหาความรู้ข้างต้นเท่านั้น (ใช้แสดงให้พนักงานทบทวนหลังสอบ)
-- ข้อความทุกช่องห้ามมีเครื่องหมายอัญประกาศคู่ (") อยู่ภายใน ถ้าต้องการเน้นคำให้ใช้ ‘ ’ แทน และห้ามขึ้นบรรทัดใหม่ภายในข้อความ เพื่อให้ JSON ถูกต้องสมบูรณ์
-- ตอบกลับเป็น JSON array ในรูปแบบนี้เท่านั้น ไม่ต้องมีข้อความอื่นใดนอกเหนือจาก JSON:
-[{"q":"...","choices":["...","...","...","..."],"answer":0,"skill":"...","explain":"..."}]`;
-  const valid = (q) => q && typeof q.q === "string" && Array.isArray(q.choices) && q.choices.length === 4 && Number.isInteger(q.answer) && q.answer >= 0 && q.answer <= 3;
+- ตอบกลับเป็นข้อความธรรมดาตามรูปแบบด้านล่างเท่านั้น ห้ามใช้ JSON ห้ามใช้ markdown ห้ามมีข้อความอื่นนอกเหนือจากข้อสอบ แต่ละข้อคั่นด้วยบรรทัดที่มีแค่ --- และทุกช่อง (Q, A, B, C, D, ANSWER, SKILL, EXPLAIN) ต้องอยู่ในบรรทัดเดียว ไม่ขึ้นบรรทัดใหม่กลางช่อง
+Q: โจทย์ข้อที่ 1
+A: ตัวเลือกที่ 1
+B: ตัวเลือกที่ 2
+C: ตัวเลือกที่ 3
+D: ตัวเลือกที่ 4
+ANSWER: ตัวอักษรของตัวเลือกที่ถูกที่สุด (A หรือ B หรือ C หรือ D)
+SKILL: ชื่อประเด็นย่อย 2-5 คำ
+EXPLAIN: คำอธิบาย 1-2 ประโยค
+---
+Q: โจทย์ข้อที่ 2
+(ทำต่อในรูปแบบเดียวกันจนครบทุกข้อ)`;
+  const parseQuizText = (text) => {
+    const out = [];
+    String(text || "").split(/^\s*-{3,}\s*$/m).forEach((block) => {
+      const get = (k) => {
+        const m = block.match(new RegExp("^[ \\t]*" + k + "[ \\t]*[:：][ \\t]*(.+)$", "mi"));
+        return m ? m[1].trim() : "";
+      };
+      const q = get("Q");
+      const choices = ["A", "B", "C", "D"].map(get);
+      const ans = get("ANSWER").toUpperCase().match(/[ABCD]/);
+      if (!q || choices.some((c) => !c) || !ans) return;
+      out.push({ q, choices, answer: "ABCD".indexOf(ans[0]), skill: get("SKILL") || "ประเด็นทั่วไป", explain: get("EXPLAIN") || "" });
+    });
+    return out;
+  };
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const text = await callClaudeAPI(apiKey, model, sys, prompt, 6e3);
-      const match = text.match(/\[[\s\S]*\]/);
-      const parsed = JSON.parse(match ? match[0] : text);
-      const good = Array.isArray(parsed) ? parsed.filter(valid) : [];
+      const good = parseQuizText(text);
       if (good.length >= Math.min(count, 5)) return shuffleQuizChoices(good.slice(0, count));
-      throw new Error("bad format");
+      throw new Error("parsed only " + good.length + " questions; raw start: " + String(text).slice(0, 120));
     } catch (e) {
       console.error("Quiz generation attempt " + attempt + " failed:", e);
     }
