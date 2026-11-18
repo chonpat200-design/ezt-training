@@ -653,7 +653,8 @@ function findEmployeeByCode(code) {
   const c = (code || "").trim().toUpperCase();
   return EMPLOYEE_WHITELIST.find((emp) => emp.code.toUpperCase() === c) || null;
 }
-const DEFAULT_MODEL = "claude-sonnet-4-5";
+const DEFAULT_MODEL = "claude-sonnet-5-5";
+const AI_ENDPOINT = "https://ezt-ai.chonpat200.workers.dev";
 const CERTIFICATE_VALID_MONTHS = 6;
 const MAX_QUIZ_ATTEMPTS_PER_DAY = 4;
 const CERTIFICATE_MIN_AVG_POST_SCORE = 80;
@@ -1215,18 +1216,23 @@ async function loadAISettings() {
   if (FIREBASE_READY) {
     try {
       const doc = await db.collection("settings").doc("global").get();
-      return doc.exists ? doc.data() : {};
+      const d = doc.exists ? { ...doc.data() } : {};
+      delete d.apiKey;
+      return d;
     } catch (e) {
       console.error("loadAISettings (Firestore) failed:", e);
     }
   }
   try {
-    return JSON.parse(localStorage.getItem("ezt_v2_settings") || "{}");
+    const d = JSON.parse(localStorage.getItem("ezt_v2_settings") || "{}");
+    delete d.apiKey;
+    return d;
   } catch (e) {
     return {};
   }
 }
-async function saveAISettings(settingsObj) {
+async function saveAISettings(rawSettings) {
+  const settingsObj = { model: String((rawSettings || {}).model || DEFAULT_MODEL) };
   if (FIREBASE_READY) {
     try {
       await db.collection("settings").doc("global").set(settingsObj);
@@ -1389,19 +1395,15 @@ function getFallbackQuestions(topic, phase, count, department) {
   return (phase === "pre" ? pre : post).slice(0, count);
 }
 async function callClaudeAPI(apiKey, model, systemPrompt, userPrompt, maxTokens = 1024) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  if (!AI_ENDPOINT) throw new Error("AI_ENDPOINT_NOT_SET");
+  const res = await fetch(AI_ENDPOINT, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true"
-    },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({
       model: model || DEFAULT_MODEL,
-      max_tokens: maxTokens,
+      maxTokens,
       system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }]
+      prompt: userPrompt
     })
   });
   if (!res.ok) {
@@ -1409,8 +1411,7 @@ async function callClaudeAPI(apiKey, model, systemPrompt, userPrompt, maxTokens 
     throw new Error("API_ERROR_" + res.status + " " + errText);
   }
   const data = await res.json();
-  const textBlock = (data.content || []).find((c) => c.type === "text");
-  return textBlock ? textBlock.text : "";
+  return data && typeof data.text === "string" ? data.text : "";
 }
 async function generateQuizQuestions({ apiKey, model, topic, phase, department, count = 4, focusSkills = [] }) {
   if (!apiKey) return getFallbackQuestions(topic, phase, count, department);
@@ -1497,7 +1498,7 @@ AI:`;
     return text.trim() || "ขออภัยครับ ไม่สามารถประมวลผลคำตอบได้ในขณะนี้";
   } catch (e) {
     console.error("Chat AI failed:", e);
-    return "ขณะนี้ไม่สามารถเชื่อมต่อ AI ได้ (ตรวจสอบ API Key ในหน้า Admin) กรุณาลองใหม่อีกครั้งครับ";
+    return "ขณะนี้ไม่สามารถเชื่อมต่อ AI ได้ (ระบบ AI ยังไม่พร้อมหรือใช้งานเกินกำหนด) กรุณาลองใหม่อีกครั้งครับ";
   }
 }
 function getFallbackEncouragement({ firstName, topicTitle, preScore, postScore, improvement, weakSkills = [] }) {
@@ -2194,7 +2195,7 @@ function App() {
   useEffect(() => {
     loadAISettings().then(setSettings);
   }, []);
-  const apiKey = settings.apiKey || "";
+  const apiKey = AI_ENDPOINT ? "proxy" : "";
   const aiModel = settings.model || DEFAULT_MODEL;
   const [certificates, setCertificates] = useState([]);
   const [adminForm, setAdminForm] = useState({ username: "", password: "" });
@@ -2204,7 +2205,7 @@ function App() {
   const [teamLeadDept, setTeamLeadDept] = useState("");
   const [records, setRecords] = useState([]);
   const [adminDeptFilter, setAdminDeptFilter] = useState("");
-  const [settingsDraft, setSettingsDraft] = useState({ apiKey: "", model: DEFAULT_MODEL });
+  const [settingsDraft, setSettingsDraft] = useState({ model: DEFAULT_MODEL });
   const [modalConfig, setModalConfig] = useState({ isOpen: false, type: "alert", message: "", onConfirm: null });
   const [existingCert, setExistingCert] = useState(null);
   const [showConfetti, setShowConfetti] = useState(false);
@@ -2671,7 +2672,7 @@ function App() {
       setIsAdminAuthed(true);
       setPage("adminDashboard");
       loadRecords();
-      setSettingsDraft({ apiKey: settings.apiKey || "", model: settings.model || DEFAULT_MODEL });
+      setSettingsDraft({ model: settings.model || DEFAULT_MODEL });
     } else {
       setModalConfig({ isOpen: true, type: "alert", message: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" });
     }
@@ -2779,7 +2780,7 @@ function App() {
     downloadCSV(csv, `EZT_Status_${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.csv`);
   };
   const saveSettings = async () => {
-    const next = { apiKey: settingsDraft.apiKey.trim(), model: settingsDraft.model.trim() || DEFAULT_MODEL };
+    const next = { model: settingsDraft.model.trim() || DEFAULT_MODEL };
     await saveAISettings(next);
     setSettings(next);
     setModalConfig({ isOpen: true, type: "alert", message: "บันทึกการตั้งค่า AI เรียบร้อยแล้วครับ" });
@@ -3064,7 +3065,7 @@ function App() {
         const rvOpen = reviewOpenKey === rvKey;
         return /* @__PURE__ */ React.createElement(React.Fragment, { key: i }, /* @__PURE__ */ React.createElement("tr", { className: "border-b border-[#1B1B18]/6 last:border-0" }, /* @__PURE__ */ React.createElement("td", { className: "p-3 pl-8 text-[#1B1B18]/75" }, r.topicTitle), /* @__PURE__ */ React.createElement("td", { className: "p-3 text-center" }, r.preScore), /* @__PURE__ */ React.createElement("td", { className: "p-3 text-center" }, r.postScore), /* @__PURE__ */ React.createElement("td", { className: `p-3 text-center font-medium ${pct >= 0 ? "text-[#2F6F64]" : "text-[#C1432E]"}` }, pct > 0 ? "+" : "", pct, "%"), /* @__PURE__ */ React.createElement("td", { className: "p-3" }, r.weakSkills && r.weakSkills.length > 0 ? /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-1" }, r.weakSkills.map((s, si) => /* @__PURE__ */ React.createElement("span", { key: si, className: "text-[10px] bg-[#C1432E]/8 text-[#9E3423] px-1.5 py-0.5 rounded-full" }, s))) : /* @__PURE__ */ React.createElement("span", { className: "text-[#1B1B18]/30" }, "—")), /* @__PURE__ */ React.createElement("td", { className: "p-3 text-[#1B1B18]/45" }, r.date, r.prevRounds && r.prevRounds.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "text-[10px] text-[#1B1B18]/40" }, "ทำซ้ำแล้ว ", r.prevRounds.length, " รอบ (รอบก่อน: ", r.prevRounds.map((p) => `${p.preScore}→${p.postScore}`).join(", "), ")")), /* @__PURE__ */ React.createElement("td", { className: "p-3" }, r.postReview ? /* @__PURE__ */ React.createElement("button", { onClick: () => setReviewOpenKey(rvOpen ? null : rvKey), className: "text-[11px] text-[#C1432E] hover:underline whitespace-nowrap" }, rvOpen ? "ซ่อนข้อสอบ" : "ดูข้อสอบ/คำตอบ") : /* @__PURE__ */ React.createElement("span", { className: "text-[#1B1B18]/30 text-[10px]" }, "ไม่มีข้อมูล (ทำก่อนเปิดฟีเจอร์)"))), rvOpen && r.postReview && /* @__PURE__ */ React.createElement("tr", null, /* @__PURE__ */ React.createElement("td", { colSpan: "7", className: "p-5 bg-white" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs font-semibold mb-2" }, "Post-test (คะแนน ", r.postScore, ")"), renderReviewList(r.postReview), r.preReview && r.preReview.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("p", { className: "text-xs font-semibold mt-6 mb-2" }, "Pre-test (คะแนน ", r.preScore, ")"), renderReviewList(r.preReview)))));
       }))))));
-    })))), adminTab === "settings" && /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl border border-[#1B1B18]/8 p-6" }, /* @__PURE__ */ React.createElement("h3", { className: "font-chakra font-semibold text-base mb-1 flex items-center gap-2" }, /* @__PURE__ */ React.createElement(Settings, { className: "w-4 h-4" }), " ตั้งค่า AI"), /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-5 leading-relaxed" }, "ใส่ Claude API Key เพื่อให้ระบบสุ่มคำถาม Pre/Post-test และ AI Chat ใช้ AI จริง หากไม่ใส่ ระบบจะใช้คำถามสำรองที่มีอยู่ในระบบแทน", /* @__PURE__ */ React.createElement("br", null), "คำเตือน: การเรียก API จากฝั่ง Browser โดยตรงแบบนี้เหมาะสำหรับ Demo/ทดสอบภายในเท่านั้น ไม่ควรใช้กับระบบจริงที่เปิดสาธารณะ เพราะ API Key จะถูกฝังไว้ในโค้ดฝั่ง Client"), /* @__PURE__ */ React.createElement("div", { className: "grid sm:grid-cols-2 gap-5" }, /* @__PURE__ */ React.createElement("div", { className: "field" }, /* @__PURE__ */ React.createElement("label", null, "Claude API Key"), /* @__PURE__ */ React.createElement("input", { type: "password", value: settingsDraft.apiKey, onChange: (e) => setSettingsDraft({ ...settingsDraft, apiKey: e.target.value }), placeholder: "sk-ant-..." })), /* @__PURE__ */ React.createElement("div", { className: "field" }, /* @__PURE__ */ React.createElement("label", null, "Model"), /* @__PURE__ */ React.createElement("input", { value: settingsDraft.model, onChange: (e) => setSettingsDraft({ ...settingsDraft, model: e.target.value }), placeholder: DEFAULT_MODEL }))), /* @__PURE__ */ React.createElement("button", { onClick: saveSettings, className: "btn-primary mt-5 px-5 py-2.5 text-xs" }, "บันทึกการตั้งค่า")))));
+    })))), adminTab === "settings" && /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl border border-[#1B1B18]/8 p-6" }, /* @__PURE__ */ React.createElement("h3", { className: "font-chakra font-semibold text-base mb-1 flex items-center gap-2" }, /* @__PURE__ */ React.createElement(Settings, { className: "w-4 h-4" }), " ตั้งค่า AI"), /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-5 leading-relaxed" }, "AI ทำงานผ่านตัวกลางฝั่งเซิร์ฟเวอร์ (Cloudflare Worker) คีย์ API ถูกเก็บไว้ที่เซิร์ฟเวอร์เท่านั้น ไม่ถูกเก็บในหน้าเว็บหรือฐานข้อมูล สถานะ: ", /* @__PURE__ */ React.createElement("b", { className: AI_ENDPOINT ? "text-[#2F6F64]" : "text-[#C1432E]" }, AI_ENDPOINT ? "เชื่อมต่อตัวกลางแล้ว" : "ยังไม่ได้ตั้งค่า (ใช้คำถามสำรอง)"), /* @__PURE__ */ React.createElement("br", null), "โมเดลที่ตัวกลางอนุญาต: claude-sonnet-5-5 และ claude-haiku-5-5"), /* @__PURE__ */ React.createElement("div", { className: "grid sm:grid-cols-2 gap-5" }, /* @__PURE__ */ React.createElement("div", { className: "field" }, /* @__PURE__ */ React.createElement("label", null, "Model"), /* @__PURE__ */ React.createElement("input", { value: settingsDraft.model, onChange: (e) => setSettingsDraft({ ...settingsDraft, model: e.target.value }), placeholder: DEFAULT_MODEL }))), /* @__PURE__ */ React.createElement("button", { onClick: saveSettings, className: "btn-primary mt-5 px-5 py-2.5 text-xs" }, "บันทึกการตั้งค่า")))));
   }
   if (page === "teamLeadDashboard" && isTeamLeadAuthed) {
     return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(CustomModal, null), /* @__PURE__ */ React.createElement("div", { className: "min-h-screen bg-[#F3EEE3] font-sarabun" }, /* @__PURE__ */ React.createElement("nav", { className: "bg-[#2F6F64] text-white px-6 py-4 flex justify-between items-center" }, /* @__PURE__ */ React.createElement("div", { className: "font-chakra text-sm flex items-center gap-2" }, /* @__PURE__ */ React.createElement(Briefcase, { className: "w-4 h-4" }), " Team Lead Dashboard — ", /* @__PURE__ */ React.createElement("span", { className: "ml-0.5" }, deptIcon(teamLeadDept)), " ", teamLeadDept), /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-4" }, /* @__PURE__ */ React.createElement("button", { onClick: toggleDarkMode, className: "w-7 h-7 rounded-full border border-white/20 hover:border-white/50 flex items-center justify-center transition-colors", title: "สลับธีมมืด/สว่าง", "aria-label": "สลับธีมมืด/สว่าง" }, isDarkMode ? /* @__PURE__ */ React.createElement(Sun, { className: "w-3.5 h-3.5 text-white/80" }) : /* @__PURE__ */ React.createElement(Moon, { className: "w-3.5 h-3.5 text-white/80" })), /* @__PURE__ */ React.createElement("button", { onClick: handleTeamLeadLogout, className: "text-xs flex items-center gap-1.5 text-white/80 hover:text-white" }, /* @__PURE__ */ React.createElement(LogOut, { className: "w-4 h-4" }), " ออกจากระบบ"))), /* @__PURE__ */ React.createElement("div", { className: "max-w-5xl mx-auto p-6 space-y-8" }, /* @__PURE__ */ React.createElement("div", { className: "grid sm:grid-cols-4 gap-4" }, /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "จำนวนบันทึกในแผนก"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, teamLeadRecords.length)), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "คะแนนเฉลี่ยก่อนเรียน"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, teamLeadAvgPre)), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "คะแนนเฉลี่ยหลังเรียน"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, teamLeadAvgPost)), /* @__PURE__ */ React.createElement("div", { className: "bg-[#2F6F64] text-white rounded-xl p-5" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-white/70 mb-1 flex items-center gap-1" }, /* @__PURE__ */ React.createElement(TrendingUp, { className: "w-3.5 h-3.5" }), " พัฒนาขึ้นเฉลี่ย"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, teamLeadAvgImprovement > 0 ? "+" : "", teamLeadAvgImprovement, "%"))), certsNearExpiry.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "bg-[#C1432E]/8 border border-[#C1432E]/20 rounded-xl p-5" }, /* @__PURE__ */ React.createElement("h3", { className: "font-chakra font-semibold text-sm text-[#9E3423] mb-3 flex items-center gap-2" }, /* @__PURE__ */ React.createElement(Lock, { className: "w-4 h-4" }), " ใบรับรองที่ใกล้หมดอายุ (ภายใน 30 วัน)"), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2" }, certsNearExpiry.map((e, i) => /* @__PURE__ */ React.createElement("span", { key: i, className: "text-xs bg-white px-3 py-1.5 rounded-full border border-[#C1432E]/20 text-[#9E3423]" }, e.firstName, " ", e.lastName, " — หมดอายุ ", formatThaiDate(e.cert.expiryDate))))), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl border border-[#1B1B18]/8 p-6" }, /* @__PURE__ */ React.createElement("h3", { className: "font-chakra font-semibold text-sm mb-1 flex items-center gap-2" }, /* @__PURE__ */ React.createElement(Sparkles, { className: "w-4 h-4 text-[#C1432E]" }), " จุดอ่อนที่พบบ่อยในทีม"), /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/45 mb-4" }, "รวบรวมจาก Skill Tag ที่ระบบวิเคราะห์จาก Pre-test ของทุกคนในแผนก ช่วยให้รู้ว่าทีมควรเสริมเรื่องอะไรโดยไม่ต้องถามทีละคน"), teamLeadWeakSkillFreq.length === 0 ? /* @__PURE__ */ React.createElement("p", { className: "text-sm text-[#1B1B18]/35" }, "ยังไม่มีข้อมูลเพียงพอ") : /* @__PURE__ */ React.createElement("div", { className: "space-y-2.5" }, teamLeadWeakSkillFreq.map(([skill, count], i) => /* @__PURE__ */ React.createElement("div", { key: i, className: "flex items-center gap-3" }, /* @__PURE__ */ React.createElement("span", { className: "text-xs text-[#1B1B18]/70 w-48 shrink-0 truncate" }, skill), /* @__PURE__ */ React.createElement("div", { className: "flex-1 h-2 bg-[#1B1B18]/8 rounded-full overflow-hidden" }, /* @__PURE__ */ React.createElement("div", { className: "h-full bg-[#C1432E]", style: { width: `${Math.min(100, count / teamLeadRecords.length * 100)}%` } })), /* @__PURE__ */ React.createElement("span", { className: "text-xs text-[#1B1B18]/45 w-6 text-right" }, count))))), /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-3" }, /* @__PURE__ */ React.createElement("h3", { className: "font-chakra font-semibold text-sm" }, "สถานะรายคนในแผนก"), /* @__PURE__ */ React.createElement("div", { className: "flex gap-2" }, /* @__PURE__ */ React.createElement(
