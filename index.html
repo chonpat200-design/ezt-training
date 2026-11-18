@@ -1412,7 +1412,9 @@ async function callClaudeAPI(apiKey, model, systemPrompt, userPrompt, maxTokens 
     throw new Error("API_ERROR_" + res.status + " " + errText);
   }
   const data = await res.json();
-  return data && typeof data.text === "string" ? data.text : "";
+  const out = data && typeof data.text === "string" ? data.text : "";
+  if (!out.trim()) console.warn("AI returned empty text. meta:", JSON.stringify(data && data.meta));
+  return out;
 }
 async function generateQuizQuestions({ apiKey, model, topic, phase, department, count = 4, focusSkills = [] }) {
   if (!apiKey) return getFallbackQuestions(topic, phase, count, department);
