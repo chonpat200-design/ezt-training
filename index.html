@@ -1397,21 +1397,32 @@ function getFallbackQuestions(topic, phase, count, department) {
 }
 async function callClaudeAPI(apiKey, model, systemPrompt, userPrompt, maxTokens = 1024) {
   if (!AI_ENDPOINT) throw new Error("AI_ENDPOINT_NOT_SET");
-  const res = await fetch(AI_ENDPOINT, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: model || DEFAULT_MODEL,
-      maxTokens,
-      system: systemPrompt,
-      prompt: userPrompt
-    })
-  });
+  const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), 170000) : null;
+  let res;
+  try {
+    res = await fetch(AI_ENDPOINT, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal: ctrl ? ctrl.signal : undefined,
+      body: JSON.stringify({
+        model: model || DEFAULT_MODEL,
+        maxTokens,
+        system: systemPrompt,
+        prompt: userPrompt
+      })
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
     throw new Error("API_ERROR_" + res.status + " " + errText);
   }
-  const data = await res.json();
+  const rawText = await res.text();
+  let data = {};
+  try { data = JSON.parse(rawText); } catch (e) { throw new Error("API_BAD_RESPONSE " + String(rawText).slice(0, 200)); }
+  if (data && data.error) throw new Error("API_ERROR_" + (data.status || "") + " " + JSON.stringify(data));
   const out = data && typeof data.text === "string" ? data.text : "";
   if (!out.trim()) console.warn("AI returned empty text. meta:", JSON.stringify(data && data.meta));
   return out;
