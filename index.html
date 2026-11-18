@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:,">
 <title>EZT Group — ระบบปฐมนิเทศและอบรมพนักงาน</title>
 
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
@@ -1441,18 +1442,24 @@ ${topic.knowledge}
 - แต่ละข้อมี 4 ตัวเลือก (choices) และระบุ index คำตอบที่ถูกที่สุด (answer) เป็นเลข 0-3
 - แต่ละข้อต้องมีฟิลด์ "skill" เป็นชื่อประเด็นย่อยที่ข้อนั้นวัด สั้นๆ 2-5 คำ (เช่น "การจัดลำดับความสำคัญ", "การขอความช่วยเหลือเมื่อไม่แน่ใจ") ให้แต่ละข้อวัดคนละประเด็นย่อยกัน ไม่ซ้ำกัน เพื่อใช้วิเคราะห์จุดอ่อนของพนักงานเป็นรายประเด็น
 - แต่ละข้อต้องมีฟิลด์ "explain" เป็นคำอธิบายสั้นๆ 1-2 ประโยคว่าทำไมตัวเลือกที่ถูกจึงถูก โดยอ้างอิงจากเนื้อหาความรู้ข้างต้นเท่านั้น (ใช้แสดงให้พนักงานทบทวนหลังสอบ)
+- ข้อความทุกช่องห้ามมีเครื่องหมายอัญประกาศคู่ (") อยู่ภายใน ถ้าต้องการเน้นคำให้ใช้ ‘ ’ แทน และห้ามขึ้นบรรทัดใหม่ภายในข้อความ เพื่อให้ JSON ถูกต้องสมบูรณ์
 - ตอบกลับเป็น JSON array ในรูปแบบนี้เท่านั้น ไม่ต้องมีข้อความอื่นใดนอกเหนือจาก JSON:
 [{"q":"...","choices":["...","...","...","..."],"answer":0,"skill":"...","explain":"..."}]`;
-  try {
-    const text = await callClaudeAPI(apiKey, model, sys, prompt, 6e3);
-    const match = text.match(/\[[\s\S]*\]/);
-    const parsed = JSON.parse(match ? match[0] : text);
-    if (Array.isArray(parsed) && parsed.length > 0) return shuffleQuizChoices(parsed.slice(0, count));
-    throw new Error("bad format");
-  } catch (e) {
-    console.error("Quiz generation failed, using fallback:", e);
-    return shuffleQuizChoices(getFallbackQuestions(topic, phase, count, department));
+  const valid = (q) => q && typeof q.q === "string" && Array.isArray(q.choices) && q.choices.length === 4 && Number.isInteger(q.answer) && q.answer >= 0 && q.answer <= 3;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const text = await callClaudeAPI(apiKey, model, sys, prompt, 6e3);
+      const match = text.match(/\[[\s\S]*\]/);
+      const parsed = JSON.parse(match ? match[0] : text);
+      const good = Array.isArray(parsed) ? parsed.filter(valid) : [];
+      if (good.length >= Math.min(count, 5)) return shuffleQuizChoices(good.slice(0, count));
+      throw new Error("bad format");
+    } catch (e) {
+      console.error("Quiz generation attempt " + attempt + " failed:", e);
+    }
   }
+  console.error("Quiz generation failed twice, using fallback");
+  return shuffleQuizChoices(getFallbackQuestions(topic, phase, count, department));
 }
 function shuffleQuizChoices(questions) {
   return questions.map((q) => {
