@@ -1,0 +1,84 @@
+rules_version = '2';
+// EZT Training - Firestore rules (candidate, NOT yet published).
+// Learners sign in anonymously. Staff sign in with email/password accounts
+// that the admin created by hand in Firebase Authentication.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.firebase.sign_in_provider == 'password'
+        && request.auth.token.email == 'admin@ezt.local';
+    }
+    function isStaff() {
+      return isAdmin() || (signedIn()
+        && request.auth.token.firebase.sign_in_provider == 'password'
+        && request.auth.token.email in [
+          'lead.ceo@ezt.local', 'lead.cfo@ezt.local', 'lead.sales@ezt.local',
+          'lead.ai@ezt.local', 'lead.hr@ezt.local', 'lead.ba@ezt.local',
+          'lead.pm@ezt.local'
+        ]);
+    }
+    function smallStr(v, n) {
+      return v is string && v.size() <= n;
+    }
+    function score(v) {
+      return v is number && v >= 0 && v <= 100;
+    }
+
+    // Quiz scores. Learners write their own rows (the app replaces a row on retake).
+    match /records/{id} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && smallStr(request.resource.data.empId, 40)
+        && score(request.resource.data.preScore)
+        && score(request.resource.data.postScore);
+      allow delete: if signedIn();
+    }
+
+    match /attempts/{id} {
+      allow read, write: if signedIn();
+    }
+    match /streaks/{id} {
+      allow read, write: if signedIn();
+    }
+    match /badges/{id} {
+      allow read, write: if signedIn();
+    }
+    match /certificates/{id} {
+      allow read, write: if signedIn();
+    }
+
+    // Written by learners, read only by staff.
+    match /consents/{id} {
+      allow create, update: if signedIn() && smallStr(request.resource.data.empId, 40);
+      allow read, delete: if isStaff();
+    }
+    match /activity/{id} {
+      allow create, update: if signedIn();
+      allow read, delete: if isStaff();
+    }
+    match /feedback/{id} {
+      allow create, update: if signedIn()
+        && smallStr(request.resource.data.empId, 40)
+        && request.resource.data.susScore is number
+        && request.resource.data.susScore >= 0
+        && request.resource.data.susScore <= 100
+        && (!('comment' in request.resource.data) || smallStr(request.resource.data.comment, 2000));
+      allow read, delete: if isStaff();
+    }
+    match /quizReports/{id} {
+      allow create: if signedIn();
+      allow read, update, delete: if isStaff();
+    }
+
+    // AI model setting: everyone reads, only the admin changes it.
+    match /settings/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+  }
+}
