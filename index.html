@@ -663,6 +663,167 @@ const VIDEO_WATCH_THRESHOLD = 0.9;
 function todayStr() {
   return (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
 }
+// ---- Minimal styled .xlsx writer (no dependencies) ----
+const XL_PALETTE = {
+  navy: "0E2233", cream: "F7F3EA", line: "D9D2C3",
+  greenBg: "E3F1EC", greenFg: "2F6F64", amberBg: "FFF1CF", amberFg: "8A6414",
+  redBg: "FBE3DE", redFg: "9E3423", grayBg: "ECECE8", grayFg: "6B665A", blueBg: "E4ECF4", blueFg: "0E2233"
+};
+const XL_CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function xlCrc32(bytes) {
+  let c = 4294967295;
+  for (let i = 0; i < bytes.length; i++) c = XL_CRC_TABLE[(c ^ bytes[i]) & 255] ^ c >>> 8;
+  return (c ^ 4294967295) >>> 0;
+}
+function xlZip(files) {
+  const enc = new TextEncoder();
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  files.forEach((f) => {
+    const name = enc.encode(f.name);
+    const data = enc.encode(f.content);
+    const crc = xlCrc32(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 67324752, true);
+    lh.setUint16(4, 20, true);
+    lh.setUint16(6, 2048, true);
+    lh.setUint16(8, 0, true);
+    lh.setUint16(10, 0, true);
+    lh.setUint16(12, 33, true);
+    lh.setUint32(14, crc, true);
+    lh.setUint32(18, data.length, true);
+    lh.setUint32(22, data.length, true);
+    lh.setUint16(26, name.length, true);
+    lh.setUint16(28, 0, true);
+    parts.push(new Uint8Array(lh.buffer), name, data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 33639248, true);
+    ch.setUint16(4, 20, true);
+    ch.setUint16(6, 20, true);
+    ch.setUint16(8, 2048, true);
+    ch.setUint16(10, 0, true);
+    ch.setUint16(12, 0, true);
+    ch.setUint16(14, 33, true);
+    ch.setUint32(16, crc, true);
+    ch.setUint32(20, data.length, true);
+    ch.setUint32(24, data.length, true);
+    ch.setUint16(28, name.length, true);
+    ch.setUint32(42, offset, true);
+    central.push(new Uint8Array(ch.buffer), name);
+    offset += 30 + name.length + data.length;
+  });
+  let cdSize = 0;
+  central.forEach((p) => cdSize += p.length);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 101010256, true);
+  end.setUint16(8, files.length, true);
+  end.setUint16(10, files.length, true);
+  end.setUint32(12, cdSize, true);
+  end.setUint32(16, offset, true);
+  const all = [...parts, ...central, new Uint8Array(end.buffer)];
+  let total = 0;
+  all.forEach((p) => total += p.length);
+  const out = new Uint8Array(total);
+  let pos = 0;
+  all.forEach((p) => {
+    out.set(p, pos);
+    pos += p.length;
+  });
+  return out;
+}
+function xlEsc(v) {
+  return String(v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
+}
+function xlCol(i) {
+  let s = "";
+  for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + (n - 1) % 26) + s;
+  return s;
+}
+function buildXlsx({ sheetName, headers, rows, widths, cellStyle }) {
+  const styles = [];
+  const styleKey = {};
+  const fills = ["none", "gray125"];
+  const fonts = [];
+  const styleId = (o) => {
+    const k = JSON.stringify(o);
+    if (styleKey[k] != null) return styleKey[k];
+    let fi = 0;
+    if (o.fill) {
+      const f = fills.indexOf(o.fill);
+      fi = f >= 0 ? f : fills.push(o.fill) - 1;
+    }
+    const fk = (o.bold ? "b" : "n") + (o.color || "000000") + (o.size || 11);
+    let fo = fonts.indexOf(fk);
+    if (fo < 0) fo = fonts.push(fk) - 1;
+    styles.push({ fi, fo, h: o.align || "left", wrap: o.wrap !== false });
+    styleKey[k] = styles.length - 1;
+    return styles.length - 1;
+  };
+  styleId({ plain: 1 });
+  const headS = styleId({ fill: XL_PALETTE.navy, color: "FFFFFF", bold: true, align: "center", size: 11 });
+  let sheetRows = "";
+  const colCount = headers.length;
+  sheetRows += `<row r="1" ht="34" customHeight="1">` + headers.map((h, c) => `<c r="${xlCol(c)}1" s="${headS}" t="inlineStr"><is><t xml:space="preserve">${xlEsc(h)}</t></is></c>`).join("") + "</row>";
+  rows.forEach((row, ri) => {
+    const r = ri + 2;
+    const zebra = ri % 2 === 0 ? "FFFFFF" : XL_PALETTE.cream;
+    sheetRows += `<row r="${r}" ht="26" customHeight="1">`;
+    row.forEach((v, c) => {
+      const st = (cellStyle && cellStyle(ri, c, v, row)) || {};
+      const s = styleId({ fill: st.fill || zebra, color: st.color || "1B1B18", bold: !!st.bold, align: st.align || (typeof v === "number" ? "center" : "left") });
+      const ref = `${xlCol(c)}${r}`;
+      if (v === null || v === void 0 || v === "") sheetRows += `<c r="${ref}" s="${s}"/>`;
+      else if (typeof v === "number" && isFinite(v)) sheetRows += `<c r="${ref}" s="${s}"><v>${v}</v></c>`;
+      else sheetRows += `<c r="${ref}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${xlEsc(v)}</t></is></c>`;
+    });
+    sheetRows += "</row>";
+  });
+  const lastRow = rows.length + 1;
+  const lastCol = xlCol(colCount - 1);
+  const cols = widths.map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`).join("");
+  const safeName = String(sheetName).replace(/[\[\]:*?\/\\]/g, " ").slice(0, 31);
+  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><sheetViews><sheetView workbookViewId="0" showGridLines="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="20"/><cols>${cols}</cols><sheetData>${sheetRows}</sheetData><autoFilter ref="A1:${lastCol}${lastRow}"/><pageMargins left="0.5" right="0.5" top="0.6" bottom="0.6" header="0.3" footer="0.3"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0"/></worksheet>`;
+  const fillXml = fills.map((f, i) => i === 0 ? '<fill><patternFill patternType="none"/></fill>' : i === 1 ? '<fill><patternFill patternType="gray125"/></fill>' : `<fill><patternFill patternType="solid"><fgColor rgb="FF${f}"/><bgColor indexed="64"/></patternFill></fill>`).join("");
+  const fontXml = fonts.map((k) => {
+    const bold = k[0] === "b";
+    const color = k.slice(1, 7);
+    const size = k.slice(7);
+    return `<font>${bold ? "<b/>" : ""}<sz val="${size}"/><color rgb="FF${color}"/><name val="Tahoma"/><family val="2"/></font>`;
+  }).join("");
+  const border = `<border><left style="thin"><color rgb="FF${XL_PALETTE.line}"/></left><right style="thin"><color rgb="FF${XL_PALETTE.line}"/></right><top style="thin"><color rgb="FF${XL_PALETTE.line}"/></top><bottom style="thin"><color rgb="FF${XL_PALETTE.line}"/></bottom><diagonal/></border>`;
+  const xfs = styles.map((s) => `<xf numFmtId="0" fontId="${s.fo}" fillId="${s.fi}" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="${s.h}" vertical="center" wrapText="${s.wrap ? 1 : 0}"/></xf>`).join("");
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="${fonts.length}">${fontXml}</fonts><fills count="${fills.length}">${fillXml}</fills><borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>${border}</borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${styles.length}">${xfs}</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+  const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${xlEsc(safeName)}" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">'${xlEsc(safeName)}'!$A$1:$${lastCol}$${lastRow}</definedName></definedNames></workbook>`;
+  const wbRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
+  const rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>';
+  const ct = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>';
+  return xlZip([
+    { name: "[Content_Types].xml", content: ct },
+    { name: "_rels/.rels", content: rels },
+    { name: "xl/workbook.xml", content: workbook },
+    { name: "xl/_rels/workbook.xml.rels", content: wbRels },
+    { name: "xl/styles.xml", content: stylesXml },
+    { name: "xl/worksheets/sheet1.xml", content: sheet }
+  ]);
+}
+function downloadXlsxFile(bytes, filename) {
+  const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
 function sanitizeId(s) {
   return String(s).replace(/[^a-zA-Z0-9_-]/g, "_");
 }
@@ -2856,6 +3017,30 @@ function App() {
   const csvCell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const fmtDate = (iso) => iso ? formatThaiDate(iso) : "—";
   const handleExportStatusCSV = (rows) => {
+    try {
+      const P = XL_PALETTE;
+      const tone = { expired: "red", stalled: "red", near: "amber", failed: "amber", learning: "blue", notstart: "gray", certified: "green" };
+      const colors = { red: [P.redBg, P.redFg], amber: [P.amberBg, P.amberFg], blue: [P.blueBg, P.blueFg], gray: [P.grayBg, P.grayFg], green: [P.greenBg, P.greenFg] };
+      const data = rows.map((r) => [r.emp.code, r.emp.firstName, r.emp.lastName, r.emp.department, STATUS_META[r.status].label, r.done, r.total, r.startedAt ? r.startedAt.slice(0, 10) : "", r.lastActive ? r.lastActive.slice(0, 10) : "", r.idleDays ?? "", r.daysInProgress || "", r.cert ? r.cert.issueDate.slice(0, 10) : "", r.cert ? r.cert.expiryDate.slice(0, 10) : "", r.daysLeft ?? "", r.rounds]);
+      const bytes = buildXlsx({
+        sheetName: "สถานะรายคน",
+        headers: ["รหัสพนักงาน", "ชื่อ", "นามสกุล", "แผนก", "สถานะ", "บทเรียนที่ทำแล้ว", "บทเรียนทั้งหมด", "วันที่เริ่ม", "ใช้งานล่าสุด", "ไม่เข้าระบบมา (วัน)", "เรียนมาแล้ว (วัน)", "ออกใบรับรองเมื่อ", "หมดอายุ", "เหลืออายุ (วัน)", "จำนวนรอบที่ทำ"],
+        rows: data,
+        widths: [14, 14, 18, 32, 22, 14, 14, 14, 14, 14, 14, 16, 14, 14, 14],
+        cellStyle: (ri, c, v, row) => {
+          if (c === 4) {
+            const k = colors[tone[rows[ri].status]] || colors.gray;
+            return { fill: k[0], color: k[1], bold: true, align: "center" };
+          }
+          if (c >= 5) return { align: "center" };
+          return null;
+        }
+      });
+      downloadXlsxFile(bytes, `EZT_Status_${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.xlsx`);
+      return;
+    } catch (err) {
+      console.error("xlsx export failed, falling back to CSV:", err);
+    }
     let csv = "รหัสพนักงาน,ชื่อ,นามสกุล,แผนก,สถานะ,บทเรียนที่ทำแล้ว,บทเรียนทั้งหมด,วันที่เริ่ม,ใช้งานล่าสุด,ไม่เข้าระบบมา(วัน),เรียนมาแล้ว(วัน),ออกใบรับรองเมื่อ,หมดอายุ,เหลืออายุ(วัน),จำนวนรอบที่ทำ\n";
     rows.forEach((r) => {
       csv += [
@@ -2977,6 +3162,28 @@ function App() {
     if (filteredRecords.length === 0) {
       setModalConfig({ isOpen: true, type: "alert", message: "ยังไม่มีข้อมูลผลการทดสอบในระบบครับ" });
       return;
+    }
+    try {
+      const P = XL_PALETTE;
+      const rows = filteredRecords.map((r) => {
+        const pct = r.preScore === 0 ? r.postScore > 0 ? 100 : 0 : Math.round((r.postScore - r.preScore) / r.preScore * 100);
+        return [r.empId, r.firstName, r.lastName, r.department, r.topicTitle || "", Number(r.preScore), Number(r.postScore), Number(r.improvement), pct, r.weakSkills && r.weakSkills.length > 0 ? r.weakSkills.join(" / ") : "-", r.date || ""];
+      });
+      const bytes = buildXlsx({
+        sheetName: "ผลสอบ",
+        headers: ["รหัสพนักงาน", "ชื่อ", "นามสกุล", "แผนก", "บทเรียน", "คะแนนก่อนเรียน", "คะแนนหลังเรียน", "ผลต่าง (คะแนน)", "พัฒนาขึ้น (%)", "จุดอ่อนที่พบ", "วันที่"],
+        rows,
+        widths: [14, 14, 18, 32, 32, 14, 14, 14, 14, 36, 22],
+        cellStyle: (ri, c, v) => {
+          if (c === 6) return v >= 80 ? { fill: P.greenBg, color: P.greenFg, bold: true, align: "center" } : v >= 60 ? { fill: P.amberBg, color: P.amberFg, bold: true, align: "center" } : { fill: P.redBg, color: P.redFg, bold: true, align: "center" };
+          if (c === 7 || c === 8) return v > 0 ? { color: P.greenFg, bold: true, align: "center" } : v < 0 ? { color: P.redFg, bold: true, align: "center" } : { align: "center" };
+          return null;
+        }
+      });
+      downloadXlsxFile(bytes, `EZT_Training_Report_${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.xlsx`);
+      return;
+    } catch (err) {
+      console.error("xlsx export failed, falling back to CSV:", err);
     }
     let csv = "รหัสพนักงาน,ชื่อ,นามสกุล,แผนก,บทเรียน,คะแนนก่อนเรียน,คะแนนหลังเรียน,ผลต่าง(คะแนน),พัฒนาขึ้น(%),จุดอ่อนที่พบ,วันที่\n";
     filteredRecords.forEach((r) => {
@@ -3117,7 +3324,7 @@ function App() {
       },
       label,
       badge > 0 && /* @__PURE__ */ React.createElement("span", { className: "ml-2 text-[10px] bg-[#C1432E] text-white px-1.5 py-0.5 rounded-full" }, badge)
-    ))), adminTab === "results" && /* @__PURE__ */ React.createElement("div", { className: "grid sm:grid-cols-4 gap-4" }, /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "จำนวนบันทึกทั้งหมด"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, filteredRecords.length)), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "คะแนนเฉลี่ยก่อนเรียน"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, avgPre)), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "คะแนนเฉลี่ยหลังเรียน"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, avgPost)), /* @__PURE__ */ React.createElement("div", { className: "bg-[#2F6F64] text-white rounded-xl p-5" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-white/70 mb-1 flex items-center gap-1" }, /* @__PURE__ */ React.createElement(TrendingUp, { className: "w-3.5 h-3.5" }), " พัฒนาขึ้นเฉลี่ย"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, avgImprovementPct > 0 ? "+" : "", avgImprovementPct, "%"))), (adminTab === "overview" || adminTab === "status" || adminTab === "results") && /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2" }, /* @__PURE__ */ React.createElement("button", { className: `chip ${adminDeptFilter === "" ? "active" : ""}`, onClick: () => setAdminDeptFilter("") }, "ทั้งหมด"), DEPARTMENTS.map((d) => /* @__PURE__ */ React.createElement("button", { key: d, className: `chip ${adminDeptFilter === d ? "active" : ""}`, onClick: () => setAdminDeptFilter(d) }, /* @__PURE__ */ React.createElement("span", { className: "mr-1.5" }, deptIcon(d)), d))), adminTab === "results" && /* @__PURE__ */ React.createElement("button", { onClick: handleExportCSV, className: "btn-primary px-4 py-2.5 text-xs flex items-center gap-2" }, /* @__PURE__ */ React.createElement(Download, { className: "w-4 h-4" }), " Export CSV"), adminTab === "status" && /* @__PURE__ */ React.createElement("button", { onClick: () => handleExportStatusCSV(adminStatusRows), className: "btn-primary px-4 py-2.5 text-xs flex items-center gap-2" }, /* @__PURE__ */ React.createElement(Download, { className: "w-4 h-4" }), " Export สถานะรายคน")), adminTab === "overview" && /* @__PURE__ */ React.createElement(AdminOverview, { key: adminDeptFilter || "all", rows: adminStatusRows, records, quizReports, feedbacks, deptFilter: adminDeptFilter }), adminTab === "status" && /* @__PURE__ */ React.createElement("div", { className: "space-y-5" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center gap-2" }, /* @__PURE__ */ React.createElement("button", { className: `chip ${statusFilter === "" ? "active" : ""}`, onClick: () => setStatusFilter("") }, "ทุกสถานะ (", adminStatusRows.length, ")"), Object.entries(STATUS_META).sort((a, b) => a[1].order - b[1].order).map(([k, m]) => {
+    ))), adminTab === "results" && /* @__PURE__ */ React.createElement("div", { className: "grid sm:grid-cols-4 gap-4" }, /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "จำนวนบันทึกทั้งหมด"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, filteredRecords.length)), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "คะแนนเฉลี่ยก่อนเรียน"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, avgPre)), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "คะแนนเฉลี่ยหลังเรียน"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, avgPost)), /* @__PURE__ */ React.createElement("div", { className: "bg-[#2F6F64] text-white rounded-xl p-5" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-white/70 mb-1 flex items-center gap-1" }, /* @__PURE__ */ React.createElement(TrendingUp, { className: "w-3.5 h-3.5" }), " พัฒนาขึ้นเฉลี่ย"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, avgImprovementPct > 0 ? "+" : "", avgImprovementPct, "%"))), (adminTab === "overview" || adminTab === "status" || adminTab === "results") && /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-3" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap gap-2" }, /* @__PURE__ */ React.createElement("button", { className: `chip ${adminDeptFilter === "" ? "active" : ""}`, onClick: () => setAdminDeptFilter("") }, "ทั้งหมด"), DEPARTMENTS.map((d) => /* @__PURE__ */ React.createElement("button", { key: d, className: `chip ${adminDeptFilter === d ? "active" : ""}`, onClick: () => setAdminDeptFilter(d) }, /* @__PURE__ */ React.createElement("span", { className: "mr-1.5" }, deptIcon(d)), d))), adminTab === "results" && /* @__PURE__ */ React.createElement("button", { onClick: handleExportCSV, className: "btn-primary px-4 py-2.5 text-xs flex items-center gap-2" }, /* @__PURE__ */ React.createElement(Download, { className: "w-4 h-4" }), " Export Excel"), adminTab === "status" && /* @__PURE__ */ React.createElement("button", { onClick: () => handleExportStatusCSV(adminStatusRows), className: "btn-primary px-4 py-2.5 text-xs flex items-center gap-2" }, /* @__PURE__ */ React.createElement(Download, { className: "w-4 h-4" }), " Export สถานะรายคน")), adminTab === "overview" && /* @__PURE__ */ React.createElement(AdminOverview, { key: adminDeptFilter || "all", rows: adminStatusRows, records, quizReports, feedbacks, deptFilter: adminDeptFilter }), adminTab === "status" && /* @__PURE__ */ React.createElement("div", { className: "space-y-5" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center gap-2" }, /* @__PURE__ */ React.createElement("button", { className: `chip ${statusFilter === "" ? "active" : ""}`, onClick: () => setStatusFilter("") }, "ทุกสถานะ (", adminStatusRows.length, ")"), Object.entries(STATUS_META).sort((a, b) => a[1].order - b[1].order).map(([k, m]) => {
       const n = adminStatusRows.filter((r) => r.status === k).length;
       return /* @__PURE__ */ React.createElement("button", { key: k, className: `chip ${statusFilter === k ? "active" : ""}`, onClick: () => setStatusFilter(statusFilter === k ? "" : k) }, m.label, " (", n, ")");
     }), /* @__PURE__ */ React.createElement(
@@ -3193,12 +3400,32 @@ function App() {
       },
       "ล้างข้อมูลทั้งหมด"
     )), renderStatusTable(shownStatusRows, { showDept: !adminDeptFilter }), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-[#1B1B18]/40 leading-relaxed" }, 'เกณฑ์: "ค้างนาน" = ยังเรียนไม่ครบและไม่เข้าระบบเกิน ', STALE_DAYS, ' วัน · "ใกล้หมดอายุ" = ใบรับรองเหลือไม่เกิน ', NEAR_EXPIRY_DAYS, " วัน · ใบรับรองมีอายุ ", CERTIFICATE_VALID_MONTHS, ' เดือน · "เรียนมาแล้ว" นับจากวันเข้าระบบ/เริ่มทำครั้งแรก (ผู้ที่เรียนก่อนมีฟีเจอร์นี้ใช้วันที่ผลสอบแรกแทน) · "รอบ" = จำนวนครั้งที่ทำหลักสูตรซ้ำ (ต่ออายุ)')), adminTab === "reports" && /* @__PURE__ */ React.createElement("div", { className: "space-y-5" }, /* @__PURE__ */ React.createElement("div", { className: "grid sm:grid-cols-3 gap-4" }, /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "รายงานทั้งหมด"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, quizReports.length)), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "รอตรวจ"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold text-[#C1432E]" }, newReports.length)), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "อัตราข้อที่ถูกรายงาน"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, reportRatePct, "%"), /* @__PURE__ */ React.createElement("p", { className: "text-[10px] text-[#1B1B18]/40 mt-1" }, "จาก ", totalPostQuestionsAnswered, " ข้อ Post-test ที่ตอบแล้ว"))), quizReports.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl border border-[#1B1B18]/8 p-8 text-center text-sm text-[#1B1B18]/40" }, "ยังไม่มีข้อสอบที่ถูกรายงาน") : [...quizReports].sort((a, b) => (a.status === "new" ? -1 : 1) - (b.status === "new" ? -1 : 1) || String(b.ts).localeCompare(String(a.ts))).map((rep) => /* @__PURE__ */ React.createElement("div", { key: rep.id, className: "bg-white rounded-xl border border-[#1B1B18]/8 p-5" }, /* @__PURE__ */ React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2 mb-2" }, /* @__PURE__ */ React.createElement("div", { className: "text-xs text-[#1B1B18]/55" }, rep.firstName, " ", rep.lastName, " · ", rep.topicTitle, " · ", fmtDate(rep.ts)), /* @__PURE__ */ React.createElement("span", { className: `text-[10px] font-semibold px-2 py-0.5 rounded-full ${rep.status === "new" ? "bg-[#C1432E]/12 text-[#9E3423]" : "bg-[#2F6F64]/12 text-[#2F6F64]"}` }, rep.status === "new" ? "รอตรวจ" : "จัดการแล้ว")), /* @__PURE__ */ React.createElement("p", { className: "text-sm font-medium mb-2" }, rep.q), /* @__PURE__ */ React.createElement("ul", { className: "space-y-1 mb-2" }, (rep.choices || []).map((c, ci) => /* @__PURE__ */ React.createElement("li", { key: ci, className: `text-xs px-3 py-1.5 rounded-lg ${ci === rep.answer ? "bg-[#2F6F64]/8 text-[#2F6F64] font-medium" : ci === rep.picked ? "bg-[#C1432E]/8 text-[#9E3423]" : "text-[#1B1B18]/55"}` }, ci === rep.answer ? "✓ เฉลยของ AI: " : ci === rep.picked ? "✗ ผู้เรียนเลือก: " : "", c))), rep.explain && /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/65 mb-2" }, /* @__PURE__ */ React.createElement("span", { className: "font-semibold" }, "คำอธิบายของ AI:"), " ", rep.explain), /* @__PURE__ */ React.createElement("p", { className: "text-xs" }, /* @__PURE__ */ React.createElement("span", { className: "font-semibold text-[#9E3423]" }, "เหตุผล:"), " ", rep.reason, rep.note ? ` — ${rep.note}` : ""), /* @__PURE__ */ React.createElement("div", { className: "mt-3 flex justify-end" }, rep.status === "new" ? /* @__PURE__ */ React.createElement("button", { onClick: () => resolveReport(rep.id, "resolved"), className: "text-xs px-3 py-1.5 rounded-md bg-[#1B1B18] text-white" }, "ทำเครื่องหมายว่าจัดการแล้ว") : /* @__PURE__ */ React.createElement("button", { onClick: () => resolveReport(rep.id, "new"), className: "text-xs px-3 py-1.5 text-[#1B1B18]/55 hover:underline" }, "ย้ายกลับเป็นรอตรวจ")))), /* @__PURE__ */ React.createElement("p", { className: "text-[11px] text-[#1B1B18]/40 leading-relaxed" }, "ข้อสอบสร้างโดย AI ใหม่ทุกครั้ง จึงไม่มีชุดเฉลยตายตัว ใช้รายงานจากผู้เรียนเป็นด่านตรวจคุณภาพ และสรุปเป็นอัตราข้อที่ถูกรายงานในรายงานบทที่ 5 ได้")), adminTab === "feedback" && /* @__PURE__ */ React.createElement("div", { className: "space-y-5" }, /* @__PURE__ */ React.createElement("div", { className: "grid sm:grid-cols-3 gap-4" }, /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "จำนวนผู้ตอบ"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, feedbacks.length)), /* @__PURE__ */ React.createElement("div", { className: "bg-[#2F6F64] text-white rounded-xl p-5" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-white/70 mb-1" }, "คะแนน SUS เฉลี่ย (เต็ม 100)"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-2xl font-semibold" }, susAvg ?? "—")), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl p-5 border border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("p", { className: "text-xs text-[#1B1B18]/50 mb-1" }, "ระดับ"), /* @__PURE__ */ React.createElement("p", { className: "font-chakra text-lg font-semibold" }, susGrade(susAvg)), /* @__PURE__ */ React.createElement("p", { className: "text-[10px] text-[#1B1B18]/40 mt-1" }, "เกณฑ์เฉลี่ยสากล = 68"))), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl border border-[#1B1B18]/8 p-5" }, /* @__PURE__ */ React.createElement("h3", { className: "font-chakra font-semibold text-sm mb-3" }, "คะแนนเฉลี่ยรายข้อ (1 = ไม่เห็นด้วยอย่างยิ่ง, 5 = เห็นด้วยอย่างยิ่ง)"), /* @__PURE__ */ React.createElement("div", { className: "space-y-2" }, SUS_ITEMS.map((t, i) => /* @__PURE__ */ React.createElement("div", { key: i, className: "flex items-center gap-3 text-xs" }, /* @__PURE__ */ React.createElement("span", { className: "w-6 text-[#1B1B18]/40" }, i + 1, "."), /* @__PURE__ */ React.createElement("span", { className: "flex-1 text-[#1B1B18]/70" }, t), /* @__PURE__ */ React.createElement("span", { className: "w-10 text-right font-medium" }, susItemAvgs[i] ?? "—"))))), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl border border-[#1B1B18]/8 p-5" }, /* @__PURE__ */ React.createElement("h3", { className: "font-chakra font-semibold text-sm mb-3" }, "ความเห็นเพิ่มเติม"), feedbacks.filter((f) => f.comment).length === 0 ? /* @__PURE__ */ React.createElement("p", { className: "text-sm text-[#1B1B18]/35" }, "ยังไม่มีความเห็น") : /* @__PURE__ */ React.createElement("ul", { className: "space-y-2" }, feedbacks.filter((f) => f.comment).map((f) => /* @__PURE__ */ React.createElement("li", { key: f.id, className: "text-sm text-[#1B1B18]/75 border-b border-[#1B1B18]/6 pb-2 last:border-0" }, "“", f.comment, "” ", /* @__PURE__ */ React.createElement("span", { className: "text-xs text-[#1B1B18]/40" }, "— ", f.firstName, " (", f.department.split(" ")[0], ") · SUS ", f.susScore))))), /* @__PURE__ */ React.createElement("button", { onClick: () => {
+      try {
+        const P = XL_PALETTE;
+        const data = feedbacks.map((f) => [f.empId, f.firstName, f.department, f.susScore, ...SUS_ITEMS.map((_, i) => (f.susAnswers || [])[i] ?? ""), f.comment || "", (f.ts || "").slice(0, 10)]);
+        const bytes = buildXlsx({
+          sheetName: "SUS",
+          headers: ["รหัสพนักงาน", "ชื่อ", "แผนก", "SUS Score", ...SUS_ITEMS.map((_, i) => `ข้อ ${i + 1}`), "ความเห็น", "วันที่"],
+          rows: data,
+          widths: [14, 14, 32, 12, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 48, 14],
+          cellStyle: (ri, c, v) => {
+            if (c === 3) return v >= 68 ? { fill: P.greenBg, color: P.greenFg, bold: true, align: "center" } : v >= 51 ? { fill: P.amberBg, color: P.amberFg, bold: true, align: "center" } : { fill: P.redBg, color: P.redFg, bold: true, align: "center" };
+            if (c >= 4 && c <= 13) return { align: "center" };
+            if (c === 15) return { align: "center" };
+            return null;
+          }
+        });
+        downloadXlsxFile(bytes, `EZT_SUS_${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.xlsx`);
+        return;
+      } catch (err) {
+        console.error("xlsx export failed, falling back to CSV:", err);
+      }
       let csv = "รหัสพนักงาน,ชื่อ,แผนก,SUS Score," + SUS_ITEMS.map((_, i) => `ข้อ${i + 1}`).join(",") + ",ความเห็น,วันที่\n";
       feedbacks.forEach((f) => {
         csv += [f.empId, f.firstName, f.department, f.susScore, ...f.susAnswers || [], f.comment, (f.ts || "").slice(0, 10)].map(csvCell).join(",") + "\n";
       });
       downloadCSV(csv, `EZT_SUS_${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.csv`);
-    }, className: "btn-primary px-4 py-2.5 text-xs flex items-center gap-2" }, /* @__PURE__ */ React.createElement(Download, { className: "w-4 h-4" }), " Export SUS (CSV)")), adminTab === "results" && /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl border border-[#1B1B18]/8 overflow-hidden" }, /* @__PURE__ */ React.createElement("table", { className: "w-full text-sm" }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { className: "text-left text-xs text-[#1B1B18]/50 border-b border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("th", { className: "p-4" }, "พนักงาน"), /* @__PURE__ */ React.createElement("th", { className: "p-4" }, "แผนก"), /* @__PURE__ */ React.createElement("th", { className: "p-4 text-center" }, "บทเรียนที่ทำแล้ว"), /* @__PURE__ */ React.createElement("th", { className: "p-4 text-center" }, "พัฒนาขึ้นเฉลี่ย"), /* @__PURE__ */ React.createElement("th", { className: "p-4" }, "ใบรับรอง"), /* @__PURE__ */ React.createElement("th", { className: "p-4" }))), /* @__PURE__ */ React.createElement("tbody", null, groupedByEmployee.length === 0 && /* @__PURE__ */ React.createElement("tr", null, /* @__PURE__ */ React.createElement("td", { colSpan: "6", className: "p-8 text-center text-[#1B1B18]/40 text-sm" }, "ยังไม่มีข้อมูลผลการทดสอบ")), groupedByEmployee.map((emp) => {
+    }, className: "btn-primary px-4 py-2.5 text-xs flex items-center gap-2" }, /* @__PURE__ */ React.createElement(Download, { className: "w-4 h-4" }), " Export SUS (Excel)")), adminTab === "results" && /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl border border-[#1B1B18]/8 overflow-hidden" }, /* @__PURE__ */ React.createElement("table", { className: "w-full text-sm" }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { className: "text-left text-xs text-[#1B1B18]/50 border-b border-[#1B1B18]/8" }, /* @__PURE__ */ React.createElement("th", { className: "p-4" }, "พนักงาน"), /* @__PURE__ */ React.createElement("th", { className: "p-4" }, "แผนก"), /* @__PURE__ */ React.createElement("th", { className: "p-4 text-center" }, "บทเรียนที่ทำแล้ว"), /* @__PURE__ */ React.createElement("th", { className: "p-4 text-center" }, "พัฒนาขึ้นเฉลี่ย"), /* @__PURE__ */ React.createElement("th", { className: "p-4" }, "ใบรับรอง"), /* @__PURE__ */ React.createElement("th", { className: "p-4" }))), /* @__PURE__ */ React.createElement("tbody", null, groupedByEmployee.length === 0 && /* @__PURE__ */ React.createElement("tr", null, /* @__PURE__ */ React.createElement("td", { colSpan: "6", className: "p-8 text-center text-[#1B1B18]/40 text-sm" }, "ยังไม่มีข้อมูลผลการทดสอบ")), groupedByEmployee.map((emp) => {
       const empKey = emp.empId + "|" + emp.department;
       const isOpen = expandedEmpId === empKey;
       const certValid = isCertificateValid(emp.cert);
