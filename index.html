@@ -2496,6 +2496,9 @@ function App() {
   const [learnerReviewOpen, setLearnerReviewOpen] = useState(false);
   const [reportForm, setReportForm] = useState(null);
   const [reportedKeys, setReportedKeys] = useState({});
+  const stepTs = useRef({});
+  const markStep = (name) => { stepTs.current[name] = Date.now(); };
+  const stepSec = (a, b) => { const x = stepTs.current[a], y = stepTs.current[b]; return x && y && y >= x ? Math.round((y - x) / 1e3) : null; };
   const [susAnswers, setSusAnswers] = useState(Array(10).fill(0));
   const [susComment, setSusComment] = useState("");
   const [susState, setSusState] = useState("idle");
@@ -2765,6 +2768,8 @@ function App() {
     const qs = await generateQuizQuestions({ apiKey, model: aiModel, topic, phase: "pre", department: preDept, count: 10 });
     setPreQuestions(qs);
     setQuizLoading(false);
+    stepTs.current = {};
+    markStep("preStart");
   };
   const handleTopicChange = (id) => {
     setActiveTopicId(id);
@@ -2783,10 +2788,15 @@ function App() {
     const score = Math.round(correct / preQuestions.length * 100);
     setPreScore(score);
     setPreWeakSkills([...new Set(weak)]);
+    markStep("preEnd");
     setPhase("video");
   };
-  const goToChat = () => setPhase("chat");
+  const goToChat = () => {
+    markStep("videoEnd");
+    setPhase("chat");
+  };
   const goToPostTest = async () => {
+    markStep("chatEnd");
     const { key, count } = await getAttemptCount(userData.empId, activeTopicId, "post");
     if (count >= MAX_QUIZ_ATTEMPTS_PER_DAY) {
       setBlockedMessage(`คุณทำแบบทดสอบหลังเรียนของหัวข้อนี้ครบ ${MAX_QUIZ_ATTEMPTS_PER_DAY} ครั้งแล้วสำหรับวันนี้ กรุณากลับมาทำใหม่พรุ่งนี้ครับ`);
@@ -2799,8 +2809,10 @@ function App() {
     const qs = await generateQuizQuestions({ apiKey, model: aiModel, topic: activeTopic, phase: "post", department: userData.department, count: 10, focusSkills: preWeakSkills });
     setPostQuestions(qs);
     setQuizLoading(false);
+    markStep("postStart");
   };
   const handlePostSubmit = async () => {
+    markStep("postEnd");
     let correct = 0;
     postQuestions.forEach((q, idx) => {
       if (postAnswers[idx] === q.answer) correct++;
@@ -2847,6 +2859,10 @@ function App() {
       date: (/* @__PURE__ */ new Date()).toLocaleString("th-TH"),
       ts: (/* @__PURE__ */ new Date()).toISOString(),
       startedAt: startTs,
+      preSec: stepSec("preStart", "preEnd"),
+      videoSec: stepSec("preEnd", "videoEnd"),
+      chatSec: stepSec("videoEnd", "chatEnd"),
+      postSec: stepSec("postStart", "postEnd"),
       preReview: toReview(preQuestions, preAnswers),
       postReview: toReview(postQuestions, postAnswers)
     };
@@ -3167,15 +3183,16 @@ function App() {
       const P = XL_PALETTE;
       const rows = filteredRecords.map((r) => {
         const pct = r.preScore === 0 ? r.postScore > 0 ? 100 : 0 : Math.round((r.postScore - r.preScore) / r.preScore * 100);
-        return [r.empId, r.firstName, r.lastName, r.department, r.topicTitle || "", Number(r.preScore), Number(r.postScore), Number(r.improvement), pct, r.weakSkills && r.weakSkills.length > 0 ? r.weakSkills.join(" / ") : "-", r.date || ""];
+        return [r.empId, r.firstName, r.lastName, r.department, r.topicTitle || "", Number(r.preScore), Number(r.postScore), Number(r.improvement), pct, r.weakSkills && r.weakSkills.length > 0 ? r.weakSkills.join(" / ") : "-", r.date || "", r.preSec ?? "", r.videoSec ?? "", r.chatSec ?? "", r.postSec ?? ""];
       });
       const bytes = buildXlsx({
         sheetName: "ผลสอบ",
-        headers: ["รหัสพนักงาน", "ชื่อ", "นามสกุล", "แผนก", "บทเรียน", "คะแนนก่อนเรียน", "คะแนนหลังเรียน", "ผลต่าง (คะแนน)", "พัฒนาขึ้น (%)", "จุดอ่อนที่พบ", "วันที่"],
+        headers: ["รหัสพนักงาน", "ชื่อ", "นามสกุล", "แผนก", "บทเรียน", "คะแนนก่อนเรียน", "คะแนนหลังเรียน", "ผลต่าง (คะแนน)", "พัฒนาขึ้น (%)", "จุดอ่อนที่พบ", "วันที่", "เวลาก่อนเรียน (วินาที)", "เวลาดูคลิป (วินาที)", "เวลาแชต AI (วินาที)", "เวลาหลังเรียน (วินาที)"],
         rows,
-        widths: [14, 14, 18, 32, 32, 14, 14, 14, 14, 36, 22],
+        widths: [14, 14, 18, 32, 32, 14, 14, 14, 14, 36, 22, 14, 14, 14, 14],
         cellStyle: (ri, c, v) => {
           if (c === 6) return v >= 80 ? { fill: P.greenBg, color: P.greenFg, bold: true, align: "center" } : v >= 60 ? { fill: P.amberBg, color: P.amberFg, bold: true, align: "center" } : { fill: P.redBg, color: P.redFg, bold: true, align: "center" };
+          if (c >= 11) return { align: "center" };
           if (c === 7 || c === 8) return v > 0 ? { color: P.greenFg, bold: true, align: "center" } : v < 0 ? { color: P.redFg, bold: true, align: "center" } : { align: "center" };
           return null;
         }
@@ -3185,12 +3202,12 @@ function App() {
     } catch (err) {
       console.error("xlsx export failed, falling back to CSV:", err);
     }
-    let csv = "รหัสพนักงาน,ชื่อ,นามสกุล,แผนก,บทเรียน,คะแนนก่อนเรียน,คะแนนหลังเรียน,ผลต่าง(คะแนน),พัฒนาขึ้น(%),จุดอ่อนที่พบ,วันที่\n";
+    let csv = "รหัสพนักงาน,ชื่อ,นามสกุล,แผนก,บทเรียน,คะแนนก่อนเรียน,คะแนนหลังเรียน,ผลต่าง(คะแนน),พัฒนาขึ้น(%),จุดอ่อนที่พบ,วันที่,เวลาก่อนเรียน(วินาที),เวลาดูคลิป(วินาที),เวลาแชต AI(วินาที),เวลาหลังเรียน(วินาที)\n";
     filteredRecords.forEach((r) => {
       const pct = r.preScore === 0 ? r.postScore > 0 ? 100 : 0 : Math.round((r.postScore - r.preScore) / r.preScore * 100);
       const cleanTitle = (r.topicTitle || "").replace(/,/g, " ");
       const weakSkillsText = r.weakSkills && r.weakSkills.length > 0 ? r.weakSkills.join(" / ") : "-";
-      csv += `"${r.empId}","${r.firstName}","${r.lastName}","${r.department}","${cleanTitle}","${r.preScore}","${r.postScore}","${r.improvement}","${pct}","${weakSkillsText}","${r.date}"
+      csv += `"${r.empId}","${r.firstName}","${r.lastName}","${r.department}","${cleanTitle}","${r.preScore}","${r.postScore}","${r.improvement}","${pct}","${weakSkillsText}","${r.date}","${r.preSec ?? ""}","${r.videoSec ?? ""}","${r.chatSec ?? ""}","${r.postSec ?? ""}"
 `;
     });
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
